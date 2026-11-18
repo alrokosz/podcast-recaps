@@ -1,0 +1,6 @@
+node_modules/
+.env*
+spike/data/
+.DS_Store
+.tools/
+work/
