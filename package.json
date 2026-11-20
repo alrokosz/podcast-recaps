@@ -1,0 +1,27 @@
+{
+  "name": "podcast-recaps",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Splice AI-written 'previously on' recaps into private podcast feeds.",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "recaps": "RECAPS_HOME=work NODE_OPTIONS=--disable-warning=ExperimentalWarning tsx --env-file-if-exists=.env.local src/cli.ts",
+    "recap": "RECAPS_HOME=work NODE_OPTIONS=--disable-warning=ExperimentalWarning tsx --env-file-if-exists=.env.local src/cli.ts make",
+    "serve": "RECAPS_HOME=work NODE_OPTIONS=--disable-warning=ExperimentalWarning tsx --env-file-if-exists=.env.local src/cli.ts serve",
+    "typecheck": "tsc --noEmit",
+    "test": "NODE_OPTIONS=--disable-warning=ExperimentalWarning tsx --test src/**/*.test.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^1.13.0",
+    "fast-xml-parser": "^5.12.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  }
+}
