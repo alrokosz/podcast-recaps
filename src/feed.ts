@@ -12,12 +12,19 @@ export interface Episode {
   publishedAt: Date;
   audioUrl: string;
   durationSeconds?: number;
+  /** Show notes, as the publisher wrote them (often HTML). */
+  description?: string;
+  imageUrl?: string;
 }
 
 export interface Show {
   title: string;
   slug: string;
   episodes: Episode[];
+  author?: string;
+  description?: string;
+  imageUrl?: string;
+  link?: string;
 }
 
 type Node = Record<string, unknown>;
@@ -81,6 +88,8 @@ export const parseFeed = (xml: string): Show => {
         publishedAt,
         audioUrl,
         durationSeconds: parseDuration(item["itunes:duration"]),
+        description: text(item["content:encoded"]) ?? text(item.description) ?? text(item["itunes:summary"]),
+        imageUrl: imageOf(item),
       },
     ];
   });
@@ -96,7 +105,24 @@ export const parseFeed = (xml: string): Show => {
     return { ...episode, index, label };
   });
 
-  return { title: showTitle, slug: slugify(showTitle), episodes };
+  return {
+    title: showTitle,
+    slug: slugify(showTitle),
+    episodes,
+    author: text(channel["itunes:author"]),
+    description: text(channel.description) ?? text(channel["itunes:summary"]),
+    imageUrl: imageOf(channel),
+    link: typeof channel.link === "string" ? text(channel.link) : undefined,
+  };
+};
+
+/** Artwork from <itunes:image href> or <image><url>. */
+const imageOf = (node: Node): string | undefined => {
+  const itunes = node["itunes:image"];
+  const href = isNode(itunes) ? text(itunes["@_href"]) : undefined;
+  if (href) return href;
+  const image = node.image;
+  return isNode(image) ? text(image.url) : undefined;
 };
 
 /** Finds an episode by label ("1.5") or, failing that, a unique title match. */

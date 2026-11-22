@@ -1,3 +1,4 @@
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
@@ -62,7 +63,31 @@ const MIGRATIONS = [
    );
    create index usage_at on usage (at);
    create table settings (key text primary key, value text not null);`,
+  // Publishing: show metadata for the cloned feed, a private token per feed, per-show default
+  // settings for Prepare next, and byte ranges delivered to the phone.
+  `alter table shows add column author text;
+   alter table shows add column description text;
+   alter table shows add column image_url text;
+   alter table shows add column link text;
+   alter table shows add column feed_token text;
+   alter table shows add column default_settings text;
+   update shows set feed_token = lower(hex(randomblob(32)));
+   create unique index shows_feed_token on shows (feed_token);
+   alter table episodes add column description text;
+   alter table episodes add column image_url text;
+   create table deliveries (
+     id integer primary key,
+     job_id integer not null references jobs(id) on delete cascade,
+     at text not null,
+     start_byte integer not null,
+     end_byte integer not null,
+     file_size integer not null
+   );
+   create index deliveries_job on deliveries (job_id);`,
 ];
+
+/** A long random token, so feed and audio URLs can't be guessed. */
+const newToken = (): string => randomBytes(32).toString("base64url");
 
 export type JobStatus = "queued" | "running" | "done" | "failed" | "cancelled" | "waiting_for_budget";
 
@@ -75,6 +100,8 @@ export interface ShowRow {
   slug: string;
   addedAt: string;
   refreshedAt: string;
+  /** Secret part of the private feed URL. Never shown in logs. */
+  feedToken: string;
 }
 
 export interface JobRow {
@@ -106,6 +133,7 @@ const toShow = (row: Row): ShowRow => ({
   slug: String(row.slug),
   addedAt: String(row.added_at),
   refreshedAt: String(row.refreshed_at),
+  feedToken: String(row.feed_token),
 });
 
 const optionalNumber = (value: SQLInputValue | undefined): number | undefined => (value == null ? undefined : Number(value));
@@ -121,6 +149,8 @@ const toEpisode = (row: Row): Episode => ({
   publishedAt: new Date(String(row.published_at)),
   audioUrl: String(row.audio_url),
   durationSeconds: optionalNumber(row.duration_seconds),
+  description: optionalText(row.description) ?? undefined,
+  imageUrl: optionalText(row.image_url) ?? undefined,
 });
 
 const toJob = (row: Row): JobRow => ({
@@ -191,23 +221,33 @@ export class Store {
       const at = now.toISOString();
       const existing = this.db.prepare("select * from shows where feed_url = ?").get(feedUrl) as Row | undefined;
       let id: number;
+      const metadata = [show.title, show.author ?? null, show.description ?? null, show.imageUrl ?? null, show.link ?? null];
       if (existing) {
         id = Number(existing.id);
-        this.db.prepare("update shows set title = ?, refreshed_at = ? where id = ?").run(show.title, at, id);
+        this.db
+          .prepare(
+            "update shows set title = ?, author = ?, description = ?, image_url = ?, link = ?, refreshed_at = ? where id = ?",
+          )
+          .run(...metadata, at, id);
       } else {
         const slug = this.uniqueSlug(show.slug);
         const result = this.db
-          .prepare("insert into shows (feed_url, title, slug, added_at, refreshed_at) values (?, ?, ?, ?, ?)")
-          .run(feedUrl, show.title, slug, at, at);
+          .prepare(
+            `insert into shows (feed_url, title, author, description, image_url, link, slug, added_at, refreshed_at, feed_token)
+             values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(feedUrl, ...metadata, slug, at, at, newToken());
         id = Number(result.lastInsertRowid);
       }
       const upsert = this.db.prepare(
-        `insert into episodes (show_id, guid, idx, label, title, season, episode_number, published_at, audio_url, duration_seconds)
-         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `insert into episodes (show_id, guid, idx, label, title, season, episode_number, published_at, audio_url,
+                               duration_seconds, description, image_url)
+         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          on conflict (show_id, guid) do update set
            idx = excluded.idx, label = excluded.label, title = excluded.title, season = excluded.season,
            episode_number = excluded.episode_number, published_at = excluded.published_at,
-           audio_url = excluded.audio_url, duration_seconds = excluded.duration_seconds`,
+           audio_url = excluded.audio_url, duration_seconds = excluded.duration_seconds,
+           description = excluded.description, image_url = excluded.image_url`,
       );
       for (const episode of show.episodes) {
         upsert.run(
@@ -221,6 +261,8 @@ export class Store {
           episode.publishedAt.toISOString(),
           episode.audioUrl,
           episode.durationSeconds ?? null,
+          episode.description ?? null,
+          episode.imageUrl ?? null,
         );
       }
       return this.getShow(id) as ShowRow;
@@ -249,12 +291,75 @@ export class Store {
 
   /** The show with its episodes in chronological order, ready for the pipeline. */
   loadShow(id: number): Show | undefined {
-    const row = this.getShow(id);
+    const row = this.db.prepare("select * from shows where id = ?").get(id) as Row | undefined;
     if (!row) return undefined;
     const episodes = (this.db.prepare("select * from episodes where show_id = ? order by idx").all(id) as Row[]).map(
       toEpisode,
     );
-    return { title: row.title, slug: row.slug, episodes };
+    return {
+      title: String(row.title),
+      slug: String(row.slug),
+      episodes,
+      author: optionalText(row.author) ?? undefined,
+      description: optionalText(row.description) ?? undefined,
+      imageUrl: optionalText(row.image_url) ?? undefined,
+      link: optionalText(row.link) ?? undefined,
+    };
+  }
+
+  /** Looks up a show by its private feed token, comparing in constant time. */
+  showByFeedToken(token: string): ShowRow | undefined {
+    const wanted = Buffer.from(token);
+    return this.listShows().find(({ feedToken }) => {
+      const actual = Buffer.from(feedToken);
+      return actual.length === wanted.length && timingSafeEqual(actual, wanted);
+    });
+  }
+
+  /** Issues a new feed token, which stops the old feed URL from working. */
+  rotateFeedToken(showId: number): ShowRow | undefined {
+    this.db.prepare("update shows set feed_token = ? where id = ?").run(newToken(), showId);
+    return this.getShow(showId);
+  }
+
+  /** Settings that Prepare next uses for this show. */
+  getShowDefaults(showId: number): unknown {
+    const row = this.db.prepare("select default_settings from shows where id = ?").get(showId) as Row | undefined;
+    return row?.default_settings == null ? undefined : JSON.parse(String(row.default_settings));
+  }
+
+  setShowDefaults(showId: number, settings: RecapSettings): void {
+    this.db.prepare("update shows set default_settings = ? where id = ?").run(JSON.stringify(settings), showId);
+  }
+
+  /** The newest finished recap with audio for each episode, keyed by episode guid. */
+  publishedRecaps(showId: number): Map<string, JobRow> {
+    const rows = this.db
+      .prepare(
+        "select * from jobs where show_id = ? and status = 'done' and audio_path is not null order by finished_at, id",
+      )
+      .all(showId) as Row[];
+    // Later rows overwrite earlier ones, so each episode keeps its newest recap.
+    return new Map(rows.map((row) => [String(row.episode_guid), toJob(row)]));
+  }
+
+  // Deliveries
+
+  recordDelivery(jobId: number, startByte: number, endByte: number, fileSize: number, now = new Date()): void {
+    this.db
+      .prepare("insert into deliveries (job_id, at, start_byte, end_byte, file_size) values (?, ?, ?, ?, ?)")
+      .run(jobId, now.toISOString(), startByte, endByte, fileSize);
+  }
+
+  /** Byte ranges fully sent for a job, as inclusive [start, end] pairs. */
+  deliveredRanges(jobId: number): { ranges: [number, number][]; fileSize: number | undefined } {
+    const rows = this.db
+      .prepare("select start_byte, end_byte, file_size from deliveries where job_id = ? order by id")
+      .all(jobId) as Row[];
+    return {
+      ranges: rows.map((row) => [Number(row.start_byte), Number(row.end_byte)]),
+      fileSize: rows.length ? Number(rows.at(-1)?.file_size) : undefined,
+    };
   }
 
   // Jobs

@@ -7,12 +7,16 @@ import { deleteApiKey, findApiKey, saveApiKey } from "./keychain.js";
 import { Llm } from "./llm.js";
 import { MODES, TONES } from "./modes.js";
 import { fetchShow, prepareRecap, showDir } from "./pipeline.js";
+import { createPublicServer, PUBLIC_BASE_URL_KEY } from "./public.js";
 import { createApi } from "./server.js";
+import { detectTailscaleUrl, funnelCommand } from "./tailscale.js";
 import { describeError, resolveSettings } from "./settings.js";
 import { Store } from "./store.js";
 import { Worker } from "./worker.js";
 
 const DEFAULT_PORT = 8786;
+/** Fixed, so the one-time Tailscale Funnel command never needs to change. */
+const FEED_PORT = 8787;
 
 /** Where shows, the database, and cached files live. */
 const dataDir = (): string => resolve(process.env.RECAPS_HOME ?? join(homedir(), ".podcast-recaps"));
@@ -115,20 +119,34 @@ const serve = async (args: string[]) => {
   const port = Number(values.port);
   if (!Number.isInteger(port) || port < 1024 || port > 65_535) return fail("--port must be from 1024 to 65535.");
 
+  const feedPort = FEED_PORT;
   const store = new Store(join(dataDir(), "recaps.db"));
   const getApiKey = async () => (await findApiKey())?.key;
+  const hasApiKey = async () => Boolean(await getApiKey());
   const worker = new Worker(store, { dataDir: dataDir(), getApiKey });
-  const api = createApi({ store, worker, dataDir: dataDir(), hasApiKey: async () => Boolean(await getApiKey()) });
+  const api = createApi({ store, worker, dataDir: dataDir(), hasApiKey, feedServerPort: feedPort });
+  const feeds = createPublicServer({ store, worker, dataDir: dataDir(), hasApiKey });
 
-  // Bound to loopback only. The public feed server for Tailscale Funnel will run separately,
-  // so this API is never reachable from the internet.
+  if (!store.getSetting(PUBLIC_BASE_URL_KEY)) {
+    const detected = await detectTailscaleUrl();
+    if (detected) store.setSetting(PUBLIC_BASE_URL_KEY, detected);
+  }
+
+  // Both bind to loopback. Tailscale Funnel forwards only to the feed server, so the local API
+  // is never reachable from the internet.
   api.listen(port, "127.0.0.1", () => {
     console.log(`Podcast Recaps service on http://127.0.0.1:${port} (data: ${dataDir()})`);
     worker.start();
   });
+  feeds.listen(feedPort, "127.0.0.1", () => {
+    const base = store.getSetting(PUBLIC_BASE_URL_KEY);
+    console.log(`Feed server on http://127.0.0.1:${feedPort}, published as ${base ?? "(no public URL set yet)"}`);
+    console.log(`To make feeds reachable from your phone, run once: ${funnelCommand(feedPort)}`);
+  });
   const shutdown = () => {
     console.log("Stopping. Any running job resumes next time.");
     api.close();
+    feeds.close();
     store.close();
     process.exit(0);
   };

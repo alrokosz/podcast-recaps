@@ -1,9 +1,12 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { estimateBatch } from "./costs.js";
 import { contextEpisodes, type Episode } from "./feed.js";
+import { coversFile, feedUrl } from "./feedxml.js";
+import { PUBLIC_BASE_URL_KEY } from "./public.js";
+import { funnelCommand } from "./tailscale.js";
 import { fetchShow, showDir } from "./pipeline.js";
 import { describeError, resolveSettings } from "./settings.js";
-import { ACTIVE_STATUSES, type JobRow, type Store } from "./store.js";
+import { ACTIVE_STATUSES, type JobRow, type ShowRow, type Store } from "./store.js";
 import type { Worker } from "./worker.js";
 
 export interface ApiOptions {
@@ -13,6 +16,8 @@ export interface ApiOptions {
   hasApiKey: () => Promise<boolean>;
   /** Replaces network feed fetching, for tests. */
   fetchFeed?: typeof fetchShow;
+  /** The loopback port of the public feed server, which Tailscale Funnel forwards to. */
+  feedServerPort?: number;
 }
 
 class HttpError extends Error {
@@ -215,9 +220,12 @@ export const createApi = (options: ApiOptions): Server => {
       handle: ([id]) => {
         const { show } = requireShow(Number(id));
         const jobs = store.listJobs({ showId: Number(id) });
+        const published = store.publishedRecaps(Number(id));
         return show.episodes.map((episode) => {
           // Jobs are newest first, so the first match is the latest.
           const latest = jobs.find(({ episodeGuid }) => episodeGuid === episode.guid);
+          const recap = published.get(episode.guid);
+          const delivery = recap ? store.deliveredRanges(recap.id) : undefined;
           return {
             guid: episode.guid,
             label: episode.label,
@@ -225,6 +233,9 @@ export const createApi = (options: ApiOptions): Server => {
             publishedAt: episode.publishedAt.toISOString(),
             durationSeconds: episode.durationSeconds ?? null,
             latestJob: latest ? publicJob(latest) : null,
+            publishedJobId: recap?.id ?? null,
+            // A strong hint, not proof, that the phone has the whole spliced file.
+            deliveredToPhone: Boolean(delivery?.fileSize !== undefined && coversFile(delivery.ranges, delivery.fileSize)),
           };
         });
       },
@@ -256,6 +267,72 @@ export const createApi = (options: ApiOptions): Server => {
         const jobs = store.enqueue(Number(id), estimates, settings);
         worker.kick();
         return jobs.map(publicJob);
+      },
+    },
+    {
+      method: "GET",
+      pattern: /^\/api\/publishing$/,
+      handle: () => ({
+        publicBaseUrl: store.getSetting(PUBLIC_BASE_URL_KEY) ?? null,
+        feedServerPort: options.feedServerPort ?? null,
+        funnelCommand: options.feedServerPort ? funnelCommand(options.feedServerPort) : null,
+      }),
+    },
+    {
+      method: "PUT",
+      pattern: /^\/api\/publishing$/,
+      handle: (_, body) => {
+        const url = body.publicBaseUrl;
+        if (url !== null && (typeof url !== "string" || !/^https:\/\/[\w.-]+(:\d+)?$/.test(url))) {
+          throw new HttpError(400, "publicBaseUrl must look like https://name.example.ts.net, or null.");
+        }
+        store.setSetting(PUBLIC_BASE_URL_KEY, url);
+        return { publicBaseUrl: url };
+      },
+    },
+    {
+      method: "GET",
+      pattern: /^\/api\/shows\/(\d+)\/feed$/,
+      handle: ([id]) => {
+        const { row } = requireShow(Number(id));
+        const base = store.getSetting(PUBLIC_BASE_URL_KEY);
+        return {
+          feedUrl: base ? feedUrl(base, row.feedToken) : null,
+          hint: base ? "Add this in Apple Podcasts with Follow a Show by URL. Keep it private." : "Set a public URL first.",
+        };
+      },
+    },
+    {
+      method: "POST",
+      pattern: /^\/api\/shows\/(\d+)\/rotate-feed-token$/,
+      handle: ([id]) => {
+        requireShow(Number(id));
+        const row = store.rotateFeedToken(Number(id)) as ShowRow;
+        const base = store.getSetting(PUBLIC_BASE_URL_KEY);
+        return { feedUrl: base ? feedUrl(base, row.feedToken) : null };
+      },
+    },
+    {
+      method: "GET",
+      pattern: /^\/api\/shows\/(\d+)\/defaults$/,
+      handle: ([id]) => {
+        requireShow(Number(id));
+        return resolveSettings(store.getShowDefaults(Number(id)));
+      },
+    },
+    {
+      method: "PUT",
+      pattern: /^\/api\/shows\/(\d+)\/defaults$/,
+      handle: ([id], body) => {
+        requireShow(Number(id));
+        let settings;
+        try {
+          settings = resolveSettings(body.settings);
+        } catch (error) {
+          throw new HttpError(400, describeError(error));
+        }
+        store.setShowDefaults(Number(id), settings);
+        return settings;
       },
     },
     {
