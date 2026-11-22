@@ -201,6 +201,13 @@ export const createPublicServer = (options: PublicOptions): Server => {
   };
 
   return createServer(async (req, res) => {
+    // One line per request, with tokens masked, to help diagnose what Apple Podcasts asks for.
+    const started = Date.now();
+    res.on("finish", () => {
+      const path = (req.url ?? "/").replace(/\/(feed|audio|next)\/[\w-]{20,}/, "/$1/<token>");
+      const agent = (req.headers["user-agent"] ?? "-").slice(0, 80);
+      console.log(`${new Date().toISOString()} ${req.method} ${path} ${res.statusCode} ${req.headers.range ?? ""} ${Date.now() - started}ms "${agent}"`);
+    });
     try {
       const { pathname } = new URL(req.url ?? "/", "http://localhost");
       const method = req.method ?? "GET";
@@ -211,7 +218,11 @@ export const createPublicServer = (options: PublicOptions): Server => {
       const next = /^\/next\/([\w-]{20,})\/([\w-]+)$/.exec(pathname);
       const token = feed?.[1] ?? audio?.[1] ?? next?.[1];
       const row = token ? store.showByFeedToken(token) : undefined;
-      if (!row) return notFound(res);
+      if (!row) {
+        // The length alone is enough to tell a mistyped URL from an old feed, without logging the token.
+        console.log(`Unknown feed token (${token?.length ?? 0} characters) for ${pathname.split("/")[1] ?? "?"}`);
+        return notFound(res);
+      }
 
       if (feed && isRead) return serveFeed(req, res, row);
       if (audio && isRead) return serveAudio(req, res, row, Number(audio[2]));
