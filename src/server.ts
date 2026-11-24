@@ -1,8 +1,15 @@
+import { execFile } from "node:child_process";
+import { createReadStream, existsSync, readFileSync, statSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
+import QRCode from "qrcode";
 import { estimateBatch } from "./costs.js";
+import { deleteApiKey, saveApiKey } from "./keychain.js";
 import { contextEpisodes, type Episode } from "./feed.js";
 import { coversFile, feedUrl } from "./feedxml.js";
-import { PUBLIC_BASE_URL_KEY } from "./public.js";
+import { PUBLIC_BASE_URL_KEY, parseRange } from "./public.js";
 import { funnelCommand } from "./tailscale.js";
 import { fetchShow, showDir } from "./pipeline.js";
 import { describeError, resolveSettings } from "./settings.js";
@@ -18,6 +25,10 @@ export interface ApiOptions {
   fetchFeed?: typeof fetchShow;
   /** The loopback port of the public feed server, which Tailscale Funnel forwards to. */
   feedServerPort?: number;
+  /** Replace Keychain, voice listing, and directory search, for tests. */
+  keys?: { save: (key: string) => Promise<void>; remove: () => Promise<void> };
+  listVoices?: () => Promise<{ name: string; locale: string }[]>;
+  searchPodcasts?: typeof searchApplePodcasts;
 }
 
 class HttpError extends Error {
@@ -104,9 +115,78 @@ const publicJob = (job: JobRow) => ({
   finishedAt: job.finishedAt,
 });
 
+/** A non-JSON response, such as the QR code or recap audio. */
+class RawResponse {
+  constructor(readonly write: (req: IncomingMessage, res: ServerResponse) => void) {}
+}
+
+const UI_DIR = join(dirname(fileURLToPath(import.meta.url)), "ui");
+const UI_FILES: Record<string, { file: string; type: string }> = {
+  "/": { file: "index.html", type: "text/html; charset=utf-8" },
+  "/app.js": { file: "app.js", type: "text/javascript; charset=utf-8" },
+  "/app.css": { file: "app.css", type: "text/css; charset=utf-8" },
+};
+
+/** Only this page's own files, artwork from https, and local audio. No inline scripts. */
+const UI_POLICY =
+  "default-src 'self'; img-src 'self' https: data:; media-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
+
+const serveUiFile = (res: ServerResponse, entry: { file: string; type: string }) => {
+  const body = readFileSync(join(UI_DIR, entry.file));
+  res.writeHead(200, {
+    "Content-Type": entry.type,
+    "Content-Length": body.length,
+    "Cache-Control": "no-cache",
+    "Content-Security-Policy": UI_POLICY,
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+  });
+  res.end(body);
+};
+
+/** Lists macOS voices from `say -v ?`, such as "Samantha (en_US)". */
+const listMacVoices = async (): Promise<{ name: string; locale: string }[]> => {
+  const { stdout } = await promisify(execFile)("say", ["-v", "?"]);
+  return stdout
+    .split("\n")
+    .map((line) => /^(.+?)\s{2,}([a-z]{2}_[A-Z0-9]+)\s/.exec(line))
+    .flatMap((match) => (match?.[1] && match[2] ? [{ name: match[1].trim(), locale: match[2] }] : []));
+};
+
+/** Searches Apple's public podcast directory. Only the search words are sent. */
+const searchApplePodcasts = async (query: string) => {
+  const url = `https://itunes.apple.com/search?media=podcast&entity=podcast&limit=12&term=${encodeURIComponent(query)}`;
+  const response = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+  if (!response.ok) throw new HttpError(502, `Podcast search failed (${response.status}).`);
+  const { results } = (await response.json()) as {
+    results: { collectionName?: string; artistName?: string; feedUrl?: string; artworkUrl100?: string; trackCount?: number }[];
+  };
+  return results
+    .filter(({ feedUrl: url }) => url)
+    .map((result) => ({
+      title: result.collectionName ?? "Untitled",
+      author: result.artistName ?? null,
+      feedUrl: result.feedUrl as string,
+      imageUrl: result.artworkUrl100 ?? null,
+      episodes: result.trackCount ?? null,
+    }));
+};
+
+/** Show fields for the UI. The feed token stays out of list responses. */
+const publicShow = ({ feedToken: _feedToken, ...row }: ShowRow) => row;
+
 export const createApi = (options: ApiOptions): Server => {
   const { store, worker, dataDir } = options;
   const fetchFeed = options.fetchFeed ?? fetchShow;
+  const keys = options.keys ?? { save: saveApiKey, remove: deleteApiKey };
+  const voices = options.listVoices ?? listMacVoices;
+  const search = options.searchPodcasts ?? searchApplePodcasts;
+
+  const jobFile = (id: number) => {
+    const job = store.getJob(Number(id));
+    if (!job) throw new HttpError(404, "No job with that id.");
+    return job;
+  };
 
   const requireShow = (id: number) => {
     const show = store.loadShow(id);
@@ -150,7 +230,8 @@ export const createApi = (options: ApiOptions): Server => {
     return { show, settings, estimates };
   };
 
-  const routes: { method: string; pattern: RegExp; handle: (match: string[], body: Record<string, unknown>) => Promise<unknown> | unknown }[] = [
+  type Handler = (match: string[], body: Record<string, unknown>, query: URLSearchParams) => Promise<unknown> | unknown;
+  const routes: { method: string; pattern: RegExp; handle: Handler }[] = [
     {
       method: "GET",
       pattern: /^\/api\/status$/,
@@ -177,7 +258,7 @@ export const createApi = (options: ApiOptions): Server => {
     {
       method: "GET",
       pattern: /^\/api\/shows$/,
-      handle: () => store.listShows(),
+      handle: () => store.listShows().map(publicShow),
     },
     {
       method: "POST",
@@ -188,7 +269,7 @@ export const createApi = (options: ApiOptions): Server => {
         const { show } = await fetchFeed(feedUrl).catch((error: unknown) => {
           throw new HttpError(502, describeError(error));
         });
-        return store.saveShow(feedUrl, show);
+        return publicShow(store.saveShow(feedUrl, show));
       },
     },
     {
@@ -199,7 +280,7 @@ export const createApi = (options: ApiOptions): Server => {
         const { show } = await fetchFeed(row.feedUrl).catch((error: unknown) => {
           throw new HttpError(502, describeError(error));
         });
-        return store.saveShow(row.feedUrl, show);
+        return publicShow(store.saveShow(row.feedUrl, show));
       },
     },
     {
@@ -267,6 +348,120 @@ export const createApi = (options: ApiOptions): Server => {
         const jobs = store.enqueue(Number(id), estimates, settings);
         worker.kick();
         return jobs.map(publicJob);
+      },
+    },
+    {
+      method: "POST",
+      pattern: /^\/api\/key$/,
+      handle: async (_, body) => {
+        const key = typeof body.apiKey === "string" ? body.apiKey.trim() : "";
+        try {
+          await keys.save(key);
+        } catch (error) {
+          throw new HttpError(400, describeError(error));
+        }
+        worker.kick();
+        return { apiKeyConfigured: true };
+      },
+    },
+    {
+      method: "DELETE",
+      pattern: /^\/api\/key$/,
+      handle: async () => {
+        await keys.remove();
+        return { apiKeyConfigured: await options.hasApiKey() };
+      },
+    },
+    {
+      method: "GET",
+      pattern: /^\/api\/voices$/,
+      handle: () => voices(),
+    },
+    {
+      method: "GET",
+      pattern: /^\/api\/search$/,
+      handle: (_, __, query) => {
+        const term = (query.get("q") ?? "").trim();
+        if (term.length < 2) throw new HttpError(400, "Type at least 2 characters to search.");
+        return search(term.slice(0, 100));
+      },
+    },
+    {
+      method: "GET",
+      pattern: /^\/api\/publishing\/check$/,
+      handle: async () => {
+        const base = store.getSetting(PUBLIC_BASE_URL_KEY);
+        if (!base) return { reachable: false, reason: "No public URL is set." };
+        try {
+          const response = await fetch(`${base}/healthz`, { signal: AbortSignal.timeout(8000) });
+          return response.ok
+            ? { reachable: true }
+            : { reachable: false, reason: `The public URL answered ${response.status}. Is Tailscale Funnel on?` };
+        } catch {
+          return { reachable: false, reason: "The public URL can't be reached. Turn on Tailscale Funnel." };
+        }
+      },
+    },
+    {
+      method: "GET",
+      pattern: /^\/api\/shows\/(\d+)$/,
+      handle: ([id]) => {
+        const { show, row } = requireShow(Number(id));
+        return {
+          id: row.id,
+          title: show.title,
+          author: show.author ?? null,
+          imageUrl: show.imageUrl ?? null,
+          feedUrl: row.feedUrl,
+          refreshedAt: row.refreshedAt,
+          episodeCount: show.episodes.length,
+        };
+      },
+    },
+    {
+      method: "GET",
+      pattern: /^\/api\/shows\/(\d+)\/feed\/qr\.svg$/,
+      handle: async ([id]) => {
+        const { row } = requireShow(Number(id));
+        const base = store.getSetting(PUBLIC_BASE_URL_KEY);
+        if (!base) throw new HttpError(409, "Set a public URL first.");
+        const svg = Buffer.from(await QRCode.toString(feedUrl(base, row.feedToken), { type: "svg", margin: 1 }));
+        return new RawResponse((_req, res) => {
+          res.writeHead(200, { "Content-Type": "image/svg+xml", "Content-Length": svg.length, "Cache-Control": "no-store" });
+          res.end(svg);
+        });
+      },
+    },
+    {
+      method: "GET",
+      pattern: /^\/api\/jobs\/(\d+)\/text$/,
+      handle: ([id]) => {
+        const job = jobFile(Number(id));
+        const read = (path: string | null) => (path && existsSync(path) ? readFileSync(path, "utf8") : null);
+        return { text: read(job.textPath), sources: read(job.sourcesPath) };
+      },
+    },
+    {
+      method: "GET",
+      pattern: /^\/api\/jobs\/(\d+)\/audio$/,
+      handle: ([id]) => {
+        const job = jobFile(Number(id));
+        const path = job.audioPath;
+        if (!path || !existsSync(path)) throw new HttpError(404, "This job has no audio.");
+        return new RawResponse((req, res) => {
+          const size = statSync(path).size;
+          const range = parseRange(req.headers.range, size);
+          if (range === "invalid") return res.writeHead(416, { "Content-Range": `bytes */${size}` }).end();
+          const start = range?.start ?? 0;
+          const end = range?.end ?? size - 1;
+          res.writeHead(range ? 206 : 200, {
+            "Content-Type": "audio/x-m4a",
+            "Accept-Ranges": "bytes",
+            "Content-Length": end - start + 1,
+            ...(range ? { "Content-Range": `bytes ${start}-${end}/${size}` } : {}),
+          });
+          createReadStream(path, { start, end }).on("error", () => res.destroy()).pipe(res);
+        });
       },
     },
     {
@@ -370,14 +565,18 @@ export const createApi = (options: ApiOptions): Server => {
   return createServer(async (req, res) => {
     try {
       checkLocalRequest(req);
-      const { pathname } = new URL(req.url ?? "/", "http://localhost");
+      const { pathname, searchParams } = new URL(req.url ?? "/", "http://localhost");
+      const uiFile = UI_FILES[pathname];
+      if (uiFile && req.method === "GET") return serveUiFile(res, uiFile);
       const matching = routes.filter(({ pattern }) => pattern.test(pathname));
       if (!matching.length) throw new HttpError(404, "Not found.");
       const route = matching.find(({ method }) => method === req.method);
       if (!route) throw new HttpError(405, "Method not allowed.");
       const body = req.method === "GET" ? {} : record(await readJson(req));
       const match = route.pattern.exec(pathname)?.slice(1) ?? [];
-      send(res, 200, await route.handle(match, body));
+      const result = await route.handle(match, body, searchParams);
+      if (result instanceof RawResponse) return result.write(req, res);
+      send(res, 200, result);
     } catch (error) {
       if (error instanceof HttpError) return send(res, error.status, { error: error.message });
       send(res, 500, { error: describeError(error) });

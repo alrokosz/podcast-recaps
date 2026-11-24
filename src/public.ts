@@ -213,6 +213,9 @@ export const createPublicServer = (options: PublicOptions): Server => {
       const method = req.method ?? "GET";
       const isRead = method === "GET" || method === "HEAD";
 
+      // Lets the local UI check that Tailscale Funnel reaches this server. Reveals nothing else.
+      if (pathname === "/healthz" && isRead) return res.writeHead(200, { "Content-Type": "text/plain" }).end("ok");
+
       const feed = /^\/feed\/([\w-]{20,})\.xml$/.exec(pathname);
       const audio = /^\/audio\/([\w-]{20,})\/(\d+)\.m4a$/.exec(pathname);
       const next = /^\/next\/([\w-]{20,})\/([\w-]+)$/.exec(pathname);

@@ -25,6 +25,7 @@ const show: Show = { title: "Test Show", slug: "test-show", episodes: [0, 1, 2].
 let base = "";
 let close = () => {};
 let dataDir = "";
+const savedKeys: string[] = [];
 
 before(async () => {
   dataDir = mkdtempSync(join(tmpdir(), "recaps-api-"));
@@ -37,7 +38,17 @@ before(async () => {
     dataDir,
     hasApiKey: async () => true,
     fetchFeed: async () => ({ show, xml: "" }),
+    keys: {
+      save: async (key) => {
+        if (!key.startsWith("sk-ant-")) throw new Error("That doesn't look like an Anthropic API key.");
+        savedKeys.push(key);
+      },
+      remove: async () => {},
+    },
+    listVoices: async () => [{ name: "Samantha", locale: "en_US" }],
+    searchPodcasts: async () => [{ title: "Test Show", author: "Host", feedUrl: "https://example.com/feed.xml", imageUrl: null, episodes: 3 }],
   });
+  store.setSetting("publicBaseUrl", "https://mac.example.ts.net");
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   close = () => {
@@ -110,4 +121,31 @@ test("refuses requests from other sites and hosts", async () => {
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
   });
   assert.equal(formPost.status, 415);
+});
+
+test("serves the UI with a strict content policy", async () => {
+  const page = await call("/");
+  assert.equal(page.status, 200);
+  assert.match(page.headers.get("content-security-policy") ?? "", /script-src 'self'/);
+  assert.match(await page.text(), /<script type="module" src="\/app.js">/);
+  assert.equal((await call("/app.js")).headers.get("content-type"), "text/javascript; charset=utf-8");
+});
+
+test("saves an API key without ever returning it", async () => {
+  const saved = await call("/api/key", { method: "POST", json: { apiKey: "sk-ant-test-1234567890abcdefghij" } });
+  assert.equal(saved.status, 200);
+  const text = await saved.text();
+  assert.doesNotMatch(text, /sk-ant/);
+  assert.deepEqual(savedKeys, ["sk-ant-test-1234567890abcdefghij"]);
+  assert.equal((await call("/api/key", { method: "POST", json: { apiKey: "nope" } })).status, 400);
+});
+
+test("feed QR code, voices, and search", async () => {
+  const shows = await (await call("/api/shows")).json();
+  const qr = await call(`/api/shows/${shows[0].id}/feed/qr.svg`);
+  assert.equal(qr.headers.get("content-type"), "image/svg+xml");
+  assert.match(await qr.text(), /^<svg/);
+  assert.deepEqual(await (await call("/api/voices")).json(), [{ name: "Samantha", locale: "en_US" }]);
+  assert.equal((await (await call("/api/search?q=test")).json())[0].title, "Test Show");
+  assert.equal((await call("/api/search?q=x")).status, 400);
 });

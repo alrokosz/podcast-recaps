@@ -135,7 +135,7 @@ const serve = async (args: string[]) => {
   // Both bind to loopback. Tailscale Funnel forwards only to the feed server, so the local API
   // is never reachable from the internet.
   api.listen(port, "127.0.0.1", () => {
-    console.log(`Podcast Recaps service on http://127.0.0.1:${port} (data: ${dataDir()})`);
+    console.log(`Podcast Recaps is running. Open http://127.0.0.1:${port} in your browser. (Data: ${dataDir()})`);
     worker.start();
   });
   feeds.listen(feedPort, "127.0.0.1", () => {

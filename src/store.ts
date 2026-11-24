@@ -102,6 +102,8 @@ export interface ShowRow {
   refreshedAt: string;
   /** Secret part of the private feed URL. Never shown in logs. */
   feedToken: string;
+  imageUrl: string | null;
+  author: string | null;
 }
 
 export interface JobRow {
@@ -134,6 +136,8 @@ const toShow = (row: Row): ShowRow => ({
   addedAt: String(row.added_at),
   refreshedAt: String(row.refreshed_at),
   feedToken: String(row.feed_token),
+  imageUrl: optionalText(row.image_url),
+  author: optionalText(row.author),
 });
 
 const optionalNumber = (value: SQLInputValue | undefined): number | undefined => (value == null ? undefined : Number(value));
