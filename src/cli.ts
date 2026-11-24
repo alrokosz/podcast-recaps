@@ -24,7 +24,7 @@ const dataDir = (): string => resolve(process.env.RECAPS_HOME ?? join(homedir(),
 const USAGE = `Usage:
   recaps make --feed <rss-url> --episode <label-or-title> [options]   Prepare one episode now
   recaps make --feed <rss-url> --list                                  List a feed's episodes
-  recaps serve [--port ${DEFAULT_PORT}]                                       Run the local service
+  recaps serve [--port ${DEFAULT_PORT}] [--feed-port ${FEED_PORT}]                    Run the local service and web UI
   recaps key set | status | delete                                     Manage the Anthropic API key
 
 Options for make:
@@ -115,11 +115,18 @@ const make = async (args: string[]) => {
 };
 
 const serve = async (args: string[]) => {
-  const { values } = parseArgs({ args, options: { port: { type: "string", default: String(DEFAULT_PORT) } } });
+  const { values } = parseArgs({
+    args,
+    options: {
+      port: { type: "string", default: String(DEFAULT_PORT) },
+      "feed-port": { type: "string", default: String(FEED_PORT) },
+    },
+  });
   const port = Number(values.port);
-  if (!Number.isInteger(port) || port < 1024 || port > 65_535) return fail("--port must be from 1024 to 65535.");
-
-  const feedPort = FEED_PORT;
+  const feedPort = Number(values["feed-port"]);
+  for (const [name, value] of [["port", port], ["feed-port", feedPort]] as const) {
+    if (!Number.isInteger(value) || value < 1024 || value > 65_535) return fail(`--${name} must be from 1024 to 65535.`);
+  }
   const store = new Store(join(dataDir(), "recaps.db"));
   const getApiKey = async () => (await findApiKey())?.key;
   const hasApiKey = async () => Boolean(await getApiKey());
