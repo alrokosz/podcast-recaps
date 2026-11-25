@@ -1,4 +1,5 @@
 import { Llm } from "./llm.js";
+import { type PacketQueue, SESSION_WRITER, SessionWriter } from "./packets.js";
 import { type PreparedRecap, prepareRecap, showDir } from "./pipeline.js";
 import { type JobRow, monthStart, type Store } from "./store.js";
 
@@ -15,6 +16,8 @@ export interface WorkerOptions {
   dataDir: string;
   /** Looked up per job, so a key saved while the service runs is picked up. */
   getApiKey: () => Promise<string | undefined>;
+  /** Where jobs written by a Claude Code session wait for the plugin. */
+  packets?: PacketQueue;
   /** Replaces the real pipeline, for tests. */
   runJob?: JobRunner;
   now?: () => Date;
@@ -147,21 +150,30 @@ export class Worker {
     if (!show) throw new Error("This show was removed.");
     const target = show.episodes.find(({ guid }) => guid === job.episodeGuid);
     if (!target) throw new Error("This episode is no longer in the feed.");
-    const apiKey = await this.options.getApiKey();
-    if (!apiKey) throw new Error("No Anthropic API key is set. Run: recaps key set");
-
-    const llm = new Llm(job.settings.model, job.settings.effort, {
-      apiKey,
-      onUsage: (record) => this.store.recordUsage(job.id, record),
-    });
     return prepareRecap({
-      writer: llm,
+      writer: await this.writerFor(job, { log, signal }),
       show,
       target,
       workDir: showDir(this.options.dataDir, show.slug),
       settings: job.settings,
       log,
       signal,
+    });
+  }
+
+  private async writerFor(job: JobRow, { log, signal }: JobContext) {
+    if (job.settings.model === SESSION_WRITER) {
+      if (!this.options.packets) throw new Error("Claude Code jobs need the local service.");
+      return new SessionWriter(this.options.packets, job.id, {
+        signal,
+        onWaiting: (step) => log(`Waiting for Claude Code to ${step}. Run /recaps prepare in Claude Code.`),
+      });
+    }
+    const apiKey = await this.options.getApiKey();
+    if (!apiKey) throw new Error("No Anthropic API key is set. Run: recaps key set");
+    return new Llm(job.settings.model, job.settings.effort, {
+      apiKey,
+      onUsage: (record) => this.store.recordUsage(job.id, record),
     });
   }
 }

@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
 import type { Episode, Show } from "./feed.js";
+import { PacketQueue } from "./packets.js";
 import { createApi } from "./server.js";
 import { Store } from "./store.js";
 import { Worker } from "./worker.js";
@@ -26,6 +27,7 @@ let base = "";
 let close = () => {};
 let dataDir = "";
 const savedKeys: string[] = [];
+const packets = new PacketQueue();
 
 before(async () => {
   dataDir = mkdtempSync(join(tmpdir(), "recaps-api-"));
@@ -35,6 +37,7 @@ before(async () => {
   const server = createApi({
     store,
     worker,
+    packets,
     dataDir,
     hasApiKey: async () => true,
     fetchFeed: async () => ({ show, xml: "" }),
@@ -148,4 +151,47 @@ test("feed QR code, voices, and search", async () => {
   assert.deepEqual(await (await call("/api/voices")).json(), [{ name: "Samantha", locale: "en_US" }]);
   assert.equal((await (await call("/api/search?q=test")).json())[0].title, "Test Show");
   assert.equal((await call("/api/search?q=x")).status, 400);
+});
+
+test("a session claims a packet, gets told what's wrong, and fixes it", async () => {
+  const empty = await (await call("/api/packets/next", { method: "POST", json: { waitSeconds: 0 } })).json();
+  assert.equal(empty.packet, null);
+
+  const result = packets.add(
+    {
+      jobId: 999,
+      kind: "generate",
+      step: "summarize 1",
+      independent: false,
+      system: "system",
+      prompt: "prompt",
+      outputSchema: {},
+      instructions: "",
+    },
+    (output) => {
+      if (typeof (output as { summary?: unknown }).summary !== "string") throw new Error("summary is required");
+      return output;
+    },
+  );
+
+  const { packet } = await (await call("/api/packets/next", { method: "POST", json: { waitSeconds: 1 } })).json();
+  assert.equal(packet.step, "summarize 1");
+  assert.equal(packet.show, null, "the job behind this test packet doesn't exist");
+  // Claimed, so a second session doesn't get the same packet.
+  assert.equal((await (await call("/api/packets/next", { method: "POST", json: {} })).json()).packet, null);
+
+  const bad = await call(`/api/packets/${packet.id}/result`, { method: "POST", json: { output: { nope: 1 } } });
+  assert.equal(bad.status, 422);
+  assert.match((await bad.json()).error, /summary is required/);
+
+  const good = await call(`/api/packets/${packet.id}/result`, { method: "POST", json: { output: { summary: "ok" } } });
+  assert.equal(good.status, 200);
+  assert.deepEqual(await result, { summary: "ok" });
+  assert.equal((await call(`/api/packets/${packet.id}/result`, { method: "POST", json: { output: {} } })).status, 404);
+});
+
+test("packet routes refuse form posts and foreign hosts", async () => {
+  assert.equal((await call("/api/packets/next", { method: "POST", body: "waitSeconds=0" })).status, 415);
+  const foreign = await call("/api/packets", { headers: { Origin: "https://evil.example" } });
+  assert.equal(foreign.status, 403);
 });

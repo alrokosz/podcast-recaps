@@ -21,6 +21,8 @@ export interface GenerateRequest<Schema extends z.ZodType> {
   prompt: string;
   schema: Schema;
   maxTokens?: number;
+  /** The step reviews other output, so a session should do it in a fresh agent that didn't write it. */
+  independentReview?: boolean;
 }
 
 export interface ResearchRequest {

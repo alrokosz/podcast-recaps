@@ -12,7 +12,11 @@ const MODE_HINTS = {
   "further-context": "Cited outside background. Best for nonfiction; fiction gets a Recap.",
 };
 const TONES = { "": "The mode's own tone", dramatic: "Dramatic", documentary: "Documentary", conversational: "Conversational", playful: "Playful" };
-const MODELS = { "claude-opus-5-5": "Claude Opus 5.5 (best)", "claude-haiku-5-5": "Claude Haiku 5.5 (cheapest)" };
+const MODELS = {
+  "claude-opus-5-5": "Claude Opus 5.5 (best)",
+  "claude-haiku-5-5": "Claude Haiku 5.5 (cheapest)",
+  "claude-code": "Claude Code session (your plan, no API key)",
+};
 
 const state = {
   status: null,

@@ -2,7 +2,8 @@ import { z } from "zod";
 import { MODES, TONES } from "./modes.js";
 import { DEFAULT_SETTINGS, type RecapSettings } from "./pipeline.js";
 
-export const MODELS = ["claude-opus-5-5", "claude-haiku-5-5"] as const;
+/** API models, plus "claude-code" for recaps written by the user's Claude Code session through the plugin. */
+export const MODELS = ["claude-opus-5-5", "claude-haiku-5-5", "claude-code"] as const;
 
 const modeNames = Object.keys(MODES) as [keyof typeof MODES, ...(keyof typeof MODES)[]];
 const toneNames = Object.keys(TONES) as [keyof typeof TONES, ...(keyof typeof TONES)[]];

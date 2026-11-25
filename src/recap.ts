@@ -291,6 +291,7 @@ export const checkScript = (
 ) =>
   writer.generate({
     step: `check ${target.label}`,
+    independentReview: true,
     system: SYSTEM,
     schema: CheckSchema,
     prompt: `Check a recap that will play before the upcoming episode "${target.title}".

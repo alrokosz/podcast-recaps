@@ -19,6 +19,8 @@ const RESEARCH_SEARCH_USD = 0.05;
 const TOKEN_SCALE: Record<string, number> = {
   "claude-opus-5-5": 1,
   "claude-haiku-5-5": 0.1 / 4,
+  // Written by the user's Claude Code session, which uses their plan instead of the API.
+  "claude-code": 0,
 };
 
 export interface EpisodeEstimate {
@@ -48,7 +50,7 @@ export const estimateBatch = (workDir: string, show: Show, targets: Episode[], s
         summarized.add(earlier.guid);
         if (!hasSummary(workDir, earlier)) newSummaries++;
       }
-      const searches = settings.mode === "further-context" ? RESEARCH_SEARCH_USD : 0;
+      const searches = settings.mode === "further-context" && scale > 0 ? RESEARCH_SEARCH_USD : 0;
       const tokens = (OPUS_RECAP_USD[settings.mode] - searches + newSummaries * OPUS_SUMMARY_USD) * scale;
       return { episode, estimatedCostUsd: round(tokens + searches), newSummaries, reusesSavedRecap: false };
     });

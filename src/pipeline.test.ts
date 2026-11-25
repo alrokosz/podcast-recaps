@@ -3,8 +3,9 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
-import type { z } from "zod";
+import { z } from "zod";
 import type { Episode, Show } from "./feed.js";
+import { PacketQueue, SessionWriter } from "./packets.js";
 import { DEFAULT_SETTINGS, prepareRecap, type RecapSettings } from "./pipeline.js";
 import type { GenerateRequest, RecapWriter, ResearchRequest, ResearchResult } from "./writer.js";
 
@@ -168,4 +169,39 @@ test("Further Context falls back to a Recap when there is little to research", a
 
   assert.deepEqual(promptsFor(writer, "research"), []);
   assert.equal(result.spokenMode, "recap");
+});
+
+test("a Claude Code session can write a whole recap through work packets", async () => {
+  setUp();
+  const queue = new PacketQueue();
+  const session = new ScriptedWriter();
+  session.checkVerdicts = ["fail", "pass"];
+  const steps: { step: string; independent: boolean }[] = [];
+
+  // Stands in for the plugin: claim each packet, answer it, submit until the job is done.
+  let done = false;
+  const sessionLoop = (async () => {
+    while (!done) {
+      const packet = await queue.next(200);
+      if (!packet) continue;
+      steps.push({ step: packet.step, independent: packet.independent });
+      const output = await session.generate({ step: packet.step, system: packet.system, prompt: packet.prompt, schema: z.any() });
+      assert.deepEqual(queue.submit(packet.id, output), { ok: true });
+    }
+  })();
+
+  const writer = new SessionWriter(queue, 1);
+  const result = await prepareRecap({ writer, show, target, workDir, settings: DEFAULT_SETTINGS, scriptOnly: true });
+  done = true;
+  await sessionLoop;
+
+  assert.match(result.spoken, /Narration 2\./);
+  assert.deepEqual(
+    steps.map(({ step }) => step),
+    ["summarize 1.1", "summarize 1.2", "brief 1.3", "script 1.3", "check 1.3", "script 1.3 (rewrite)", "check 1.3"],
+  );
+  assert.ok(steps.filter(({ step }) => step.startsWith("check")).every(({ independent }) => independent));
+  assert.ok(steps.filter(({ step }) => !step.startsWith("check")).every(({ independent }) => !independent));
+  const saved = JSON.parse(readFileSync(result.textPath.replace(/\.txt$/, ".json"), "utf8"));
+  assert.equal(saved.model, "claude-code");
 });

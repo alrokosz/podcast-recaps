@@ -5,6 +5,7 @@ import { parseArgs } from "node:util";
 import { findEpisode } from "./feed.js";
 import { deleteApiKey, findApiKey, saveApiKey } from "./keychain.js";
 import { Llm } from "./llm.js";
+import { PacketQueue, SESSION_WRITER } from "./packets.js";
 import { MODES, TONES } from "./modes.js";
 import { fetchShow, prepareRecap, showDir } from "./pipeline.js";
 import { createPublicServer, PUBLIC_BASE_URL_KEY } from "./public.js";
@@ -85,6 +86,9 @@ const make = async (args: string[]) => {
   } catch (error) {
     return fail(describeError(error));
   }
+  if (settings.model === SESSION_WRITER) {
+    return fail("Claude Code recaps run through the service: start it with `recaps serve`, then use /recaps prepare in Claude Code.");
+  }
 
   const { show, xml } = await fetchShow(values.feed);
   if (values.list) {
@@ -130,8 +134,9 @@ const serve = async (args: string[]) => {
   const store = new Store(join(dataDir(), "recaps.db"));
   const getApiKey = async () => (await findApiKey())?.key;
   const hasApiKey = async () => Boolean(await getApiKey());
-  const worker = new Worker(store, { dataDir: dataDir(), getApiKey });
-  const api = createApi({ store, worker, dataDir: dataDir(), hasApiKey, feedServerPort: feedPort });
+  const packets = new PacketQueue();
+  const worker = new Worker(store, { dataDir: dataDir(), getApiKey, packets });
+  const api = createApi({ store, worker, packets, dataDir: dataDir(), hasApiKey, feedServerPort: feedPort });
   const feeds = createPublicServer({ store, worker, dataDir: dataDir(), hasApiKey });
 
   if (!store.getSetting(PUBLIC_BASE_URL_KEY)) {

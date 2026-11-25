@@ -10,6 +10,7 @@ import { deleteApiKey, saveApiKey } from "./keychain.js";
 import { contextEpisodes, type Episode } from "./feed.js";
 import { coversFile, feedUrl } from "./feedxml.js";
 import { PUBLIC_BASE_URL_KEY, parseRange } from "./public.js";
+import { MAX_WAIT_MS, type Packet, type PacketQueue, SESSION_WRITER } from "./packets.js";
 import { funnelCommand } from "./tailscale.js";
 import { fetchShow, showDir } from "./pipeline.js";
 import { describeError, resolveSettings } from "./settings.js";
@@ -19,6 +20,8 @@ import type { Worker } from "./worker.js";
 export interface ApiOptions {
   store: Store;
   worker: Worker;
+  /** Writing steps waiting for a Claude Code session, which the plugin claims and submits here. */
+  packets?: PacketQueue;
   dataDir: string;
   hasApiKey: () => Promise<boolean>;
   /** Replaces network feed fetching, for tests. */
@@ -229,6 +232,28 @@ export const createApi = (options: ApiOptions): Server => {
     const estimates = estimateBatch(showDir(dataDir, show.slug), show, targets, settings);
     return { show, settings, estimates };
   };
+
+  const requirePackets = (): PacketQueue => {
+    if (!options.packets) throw new HttpError(503, "Claude Code packets aren't enabled in this service.");
+    return options.packets;
+  };
+
+  /** The show and episode a packet is for, so a session can say what it's working on. */
+  const packetContext = (packet: Packet) => {
+    const job = store.getJob(packet.jobId);
+    const show = job ? store.getShow(job.showId) : undefined;
+    const episode = job ? store.loadShow(job.showId)?.episodes.find(({ guid }) => guid === job.episodeGuid) : undefined;
+    return { show: show?.title ?? null, episode: episode ? `${episode.label} · ${episode.title}` : null };
+  };
+  const packetSummary = (packet: Packet) => ({
+    id: packet.id,
+    jobId: packet.jobId,
+    step: packet.step,
+    kind: packet.kind,
+    claimed: Boolean(packet.claimedAt),
+    ...packetContext(packet),
+  });
+  const describePacket = (packet: Packet) => ({ ...packet, ...packetContext(packet) });
 
   type Handler = (match: string[], body: Record<string, unknown>, query: URLSearchParams) => Promise<unknown> | unknown;
   const routes: { method: string; pattern: RegExp; handle: Handler }[] = [
@@ -559,6 +584,48 @@ export const createApi = (options: ApiOptions): Server => {
       method: "POST",
       pattern: /^\/api\/batches\/([\w-]+)\/cancel$/,
       handle: ([batchId]) => ({ cancelled: worker.cancelBatch(batchId ?? "") }),
+    },
+
+    // Work packets for the Claude Code plugin. Loopback only, like everything on this server.
+    {
+      method: "GET",
+      pattern: /^\/api\/packets$/,
+      handle: () => requirePackets().list().map(packetSummary),
+    },
+    {
+      method: "POST",
+      pattern: /^\/api\/packets\/next$/,
+      handle: async (_, body) => {
+        const waitSeconds = body.waitSeconds ?? 0;
+        if (typeof waitSeconds !== "number" || !(waitSeconds >= 0)) throw new HttpError(400, "waitSeconds must be a number of seconds.");
+        const packet = await requirePackets().next(waitSeconds * 1000);
+        if (packet) return { packet: describePacket(packet) };
+        // Nothing to write yet: say why, so the session knows whether to wait or stop.
+        const active = store.listJobs({ statuses: ["running", "queued"] }).filter(({ settings }) => settings.model === SESSION_WRITER);
+        return {
+          packet: null,
+          activeJobs: active.length,
+          progress: active.find(({ status }) => status === "running")?.progress ?? null,
+          maxWaitSeconds: MAX_WAIT_MS / 1000,
+        };
+      },
+    },
+    {
+      method: "POST",
+      pattern: /^\/api\/packets\/([\w-]+)\/result$/,
+      handle: ([id], body) => {
+        const result = requirePackets().submit(id ?? "", body.output);
+        if (!result.ok) throw new HttpError(result.status, result.error);
+        return { ok: true };
+      },
+    },
+    {
+      method: "POST",
+      pattern: /^\/api\/packets\/([\w-]+)\/release$/,
+      handle: ([id]) => {
+        if (!requirePackets().release(id ?? "")) throw new HttpError(404, "No open packet with that id.");
+        return { ok: true };
+      },
     },
   ];
 
