@@ -13,7 +13,7 @@ import {
   writeJoinedWav,
 } from "./audio.js";
 import { contextEpisodes, type Episode, episodeName, parseFeed, type Show } from "./feed.js";
-import type { Effort, Llm } from "./llm.js";
+import type { Effort } from "./llm.js";
 import { isMode, MODES, type Mode, type Tone, usesResearch } from "./modes.js";
 import {
   checkScript,
@@ -29,6 +29,7 @@ import {
   writeScript,
 } from "./recap.js";
 import { downloadFile, transcribe } from "./transcribe.js";
+import type { RecapWriter } from "./writer.js";
 
 /** Everything a listener can choose about a recap. */
 export interface RecapSettings {
@@ -70,7 +71,8 @@ export const fetchShow = async (feedUrl: string): Promise<{ show: Show; xml: str
 };
 
 export interface PrepareRequest {
-  llm: Llm;
+  /** The API with the user's key, or a Claude Code session through the plugin. */
+  writer: RecapWriter;
   show: Show;
   target: Episode;
   workDir: string;
@@ -100,7 +102,7 @@ export const outputBase = (workDir: string, target: Episode, mode: Mode): string
   join(workDir, "output", `${target.label}-${mode}`);
 
 export const prepareRecap = async (request: PrepareRequest): Promise<PreparedRecap> => {
-  const { llm, show, target, workDir, settings, signal } = request;
+  const { writer, show, target, workDir, settings, signal } = request;
   const log = request.log ?? (() => {});
   const context = contextEpisodes(show, target);
   if (!context.length) throw new Error(`"${target.title}" has no earlier episodes to recap.`);
@@ -109,10 +111,10 @@ export const prepareRecap = async (request: PrepareRequest): Promise<PreparedRec
   mkdirSync(join(workDir, "output"), { recursive: true });
   const recapJson = `${base}.json`;
 
-  const reused = request.regenerate ? undefined : savedNarration(recapJson, settings);
+  const reused = request.regenerate ? undefined : savedNarration(recapJson, settings, writer.name);
   if (reused) log(`Reusing the saved recap for "${target.title}"`);
   const { narration, spokenMode } =
-    reused ?? (await createNarration({ llm, show, workDir, target, context, settings, recapJson, log, signal }));
+    reused ?? (await createNarration({ writer, show, workDir, target, context, settings, recapJson, log, signal }));
 
   const spoken = [
     "This is an unofficial, AI-generated recap.",
@@ -150,16 +152,20 @@ interface Narration {
 }
 
 /** Whether a passing recap with these writing settings is saved, so preparing it again is free. */
-export const hasSavedRecap = (workDir: string, target: Episode, settings: RecapSettings): boolean =>
-  savedNarration(`${outputBase(workDir, target, settings.mode)}.json`, settings) !== undefined;
+export const hasSavedRecap = (
+  workDir: string,
+  target: Episode,
+  settings: RecapSettings,
+  writerName = settings.model,
+): boolean => savedNarration(`${outputBase(workDir, target, settings.mode)}.json`, settings, writerName) !== undefined;
 
-/** Returns a saved narration that passed its check with the same writing settings, if any. */
-const savedNarration = (path: string, settings: RecapSettings): Narration | undefined => {
+/** Returns a saved narration that passed its check with the same writer and writing settings, if any. */
+const savedNarration = (path: string, settings: RecapSettings, writerName: string): Narration | undefined => {
   if (!existsSync(path)) return undefined;
   const saved = JSON.parse(readFileSync(path, "utf8")) as Partial<SavedRecap>;
   const last = saved.attempts?.at(-1);
   const sameSettings =
-    saved.model === settings.model &&
+    saved.model === writerName &&
     (saved.tone ?? null) === settings.tone &&
     (saved.instructions ?? null) === settings.instructions;
   if (!sameSettings || last?.check.verdict !== "pass") return undefined;
@@ -187,20 +193,20 @@ const readSummary = (workDir: string, episode: Episode): EpisodeSummary | undefi
   return cached.version === SUMMARY_VERSION && parsed.success ? parsed.data : undefined;
 };
 
-const getSummary = async (llm: Llm, show: Show, workDir: string, episode: Episode): Promise<EpisodeSummary> => {
+const getSummary = async (writer: RecapWriter, show: Show, workDir: string, episode: Episode): Promise<EpisodeSummary> => {
   const cached = readSummary(workDir, episode);
   if (cached) return cached;
-  const summary = await summarizeEpisode(llm, show.title, episode, await getTranscript(workDir, episode));
+  const summary = await summarizeEpisode(writer, show.title, episode, await getTranscript(workDir, episode));
   mkdirSync(join(workDir, "summaries"), { recursive: true });
   writeFileSync(
     join(workDir, "summaries", `${episode.label}.json`),
-    `${JSON.stringify({ version: SUMMARY_VERSION, model: llm.model, summary }, null, 2)}\n`,
+    `${JSON.stringify({ version: SUMMARY_VERSION, model: writer.name, summary }, null, 2)}\n`,
   );
   return summary;
 };
 
 interface NarrationRequest {
-  llm: Llm;
+  writer: RecapWriter;
   show: Show;
   workDir: string;
   target: Episode;
@@ -212,21 +218,21 @@ interface NarrationRequest {
 }
 
 const createNarration = async (request: NarrationRequest): Promise<Narration> => {
-  const { llm, show, workDir, target, context, settings, recapJson, log, signal } = request;
+  const { writer, show, workDir, target, context, settings, recapJson, log, signal } = request;
   const { mode, tone, instructions } = settings;
-  log(`${show.title}: preparing "${target.title}" from ${context.length} earlier episodes with ${llm.model}`);
+  log(`${show.title}: preparing "${target.title}" from ${context.length} earlier episodes with ${writer.name}`);
 
   log("Transcribing and summarizing earlier episodes");
   const summaries: LabeledSummary[] = [];
   for (const episode of context) {
     signal?.throwIfAborted();
-    summaries.push({ episode, summary: await getSummary(llm, show, workDir, episode) });
+    summaries.push({ episode, summary: await getSummary(writer, show, workDir, episode) });
   }
 
   signal?.throwIfAborted();
   log("Reading the upcoming episode privately");
   const targetTranscript = await getTranscript(workDir, target);
-  const brief = await createBrief(llm, show.title, target, summaries, targetTranscript);
+  const brief = await createBrief(writer, show.title, target, summaries, targetTranscript);
 
   // Research modes fall back to a plain recap when there is too little real-world background to explain.
   let writingMode: Mode = mode;
@@ -239,7 +245,7 @@ const createNarration = async (request: NarrationRequest): Promise<Narration> =>
     } else {
       signal?.throwIfAborted();
       log(`Researching ${references.length} real-world references on the web: ${references.join("; ")}`);
-      research = await researchContext(llm, show.title, target, summaries, brief, references);
+      research = await researchContext(writer, show.title, target, summaries, brief, references);
       log(`Kept ${research.facts.length} cited facts from ${research.sources.length} sources`);
       if (research.facts.length < MIN_OUTSIDE_FACTS) {
         log("Too few cited facts for a briefing, so writing a Recap instead");
@@ -262,16 +268,16 @@ const createNarration = async (request: NarrationRequest): Promise<Narration> =>
     listenerPreferences: instructions ?? undefined,
   };
   const check = (text: string, earlier: LabeledSummary[], facts = contextFacts) =>
-    checkScript(llm, target, text, earlier, brief.spoilerTopics, targetTranscript, facts);
+    checkScript(writer, target, text, earlier, brief.spoilerTopics, targetTranscript, facts);
 
-  let narration = await writeScript(llm, scriptRequest);
+  let narration = await writeScript(writer, scriptRequest);
   let result = await check(narration, summaries);
   const attempts = [{ narration, check: result }];
 
   if (result.verdict === "fail") {
     signal?.throwIfAborted();
     log(`Check found ${result.issues.length} issue(s), rewriting`);
-    narration = await writeScript(llm, { ...scriptRequest, previousIssues: result.issues });
+    narration = await writeScript(writer, { ...scriptRequest, previousIssues: result.issues });
     result = await check(narration, summaries);
     attempts.push({ narration, check: result });
   }
@@ -281,7 +287,7 @@ const createNarration = async (request: NarrationRequest): Promise<Narration> =>
     const recent = summaries.slice(-2);
     if (usesResearch(writingMode)) writingMode = "recap";
     const fallback = { ...scriptRequest, mode: writingMode, summaries: recent, brief: undefined, contextFacts: undefined };
-    narration = await writeScript(llm, fallback);
+    narration = await writeScript(writer, fallback);
     result = await check(narration, recent, undefined);
     attempts.push({ narration, check: result });
   }
@@ -291,7 +297,7 @@ const createNarration = async (request: NarrationRequest): Promise<Narration> =>
     target: target.title,
     mode,
     spokenMode: writingMode,
-    model: llm.model,
+    model: writer.name,
     effort: settings.effort,
     tone,
     instructions,

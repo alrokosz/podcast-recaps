@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { Episode } from "./feed.js";
-import type { Llm, Source } from "./llm.js";
+import type { RecapWriter, Source } from "./writer.js";
 import { MODES, type Mode, type Tone, TONES } from "./modes.js";
 
 /** Bump when prompts change, so cached summaries are regenerated. */
@@ -90,8 +90,8 @@ Open threads: ${summary.openThreads.join(" ")}
     )
     .join("\n");
 
-export const summarizeEpisode = (llm: Llm, showTitle: string, episode: Episode, transcript: string) =>
-  llm.generate({
+export const summarizeEpisode = (writer: RecapWriter, showTitle: string, episode: Episode, transcript: string) =>
+  writer.generate({
     step: `summarize ${episode.label}`,
     system: SYSTEM,
     schema: EpisodeSummarySchema,
@@ -104,13 +104,13 @@ ${transcript}
 
 /** Reads the upcoming episode privately to decide which earlier threads matter. */
 export const createBrief = (
-  llm: Llm,
+  writer: RecapWriter,
   showTitle: string,
   target: Episode,
   summaries: LabeledSummary[],
   targetTranscript: string,
 ) =>
-  llm.generate({
+  writer.generate({
     step: `brief ${target.label}`,
     system: SYSTEM,
     schema: BriefSchema,
@@ -147,7 +147,7 @@ export interface ContextFact {
 
 /** Finds cited outside background for the upcoming episode, keeping only facts tied to real sources. */
 export const researchContext = async (
-  llm: Llm,
+  writer: RecapWriter,
   showTitle: string,
   target: Episode,
   summaries: LabeledSummary[],
@@ -160,7 +160,7 @@ ${list(brief.spoilerTopics)}
 Also skip background the upcoming episode explains itself:
 ${list(brief.explainedInEpisode)}`;
 
-  const { notes, sources } = await llm.research({
+  const { notes, sources } = await writer.research({
     step: `research ${target.label}`,
     system: SYSTEM,
     maxSearches: 5,
@@ -178,7 +178,7 @@ ${formatSummaries(summaries)}
   });
   if (!sources.length) throw new Error(`research ${target.label}: no cited sources were found.`);
 
-  const { facts } = await llm.generate({
+  const { facts } = await writer.generate({
     step: `background ${target.label}`,
     system: SYSTEM,
     schema: ContextFactsSchema,
@@ -226,7 +226,7 @@ export interface ScriptRequest {
   previousIssues?: Check["issues"];
 }
 
-export const writeScript = async (llm: Llm, request: ScriptRequest): Promise<string> => {
+export const writeScript = async (writer: RecapWriter, request: ScriptRequest): Promise<string> => {
   const { showTitle, target, mode, summaries, brief, contextFacts, tone, listenerPreferences, previousIssues } =
     request;
   const background = contextFacts?.length
@@ -256,7 +256,7 @@ ${listenerPreferences.trim()}
 </listener_preferences>`
     : "";
 
-  const { narration } = await llm.generate({
+  const { narration } = await writer.generate({
     step: `script ${target.label}${previousIssues ? " (rewrite)" : brief ? "" : " (fallback)"}`,
     system: SYSTEM,
     schema: ScriptSchema,
@@ -281,7 +281,7 @@ ${formatSummaries(summaries)}
 };
 
 export const checkScript = (
-  llm: Llm,
+  writer: RecapWriter,
   target: Episode,
   narration: string,
   summaries: LabeledSummary[],
@@ -289,7 +289,7 @@ export const checkScript = (
   targetTranscript: string,
   contextFacts?: ContextFact[],
 ) =>
-  llm.generate({
+  writer.generate({
     step: `check ${target.label}`,
     system: SYSTEM,
     schema: CheckSchema,

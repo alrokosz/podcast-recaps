@@ -2,6 +2,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { betaZodOutputFormat } from "@anthropic-ai/sdk/helpers/beta/zod";
 import { appendFileSync } from "node:fs";
 import type { z } from "zod";
+import type { GenerateRequest, RecapWriter, ResearchRequest, ResearchResult, Source } from "./writer.js";
 
 export type Effort = "low" | "medium" | "high";
 
@@ -20,27 +21,6 @@ const FALLBACK_MODELS = new Set(["claude-opus-5-5", "claude-sonnet-5-5", "claude
 /** How many times to resume a long server-side search turn before giving up. */
 const MAX_CONTINUATIONS = 4;
 
-export interface Source {
-  id: number;
-  title: string;
-  url: string;
-  /** Passages Claude cited from this page. */
-  excerpts: string[];
-}
-
-export interface ResearchResult {
-  /** Claude's notes, with [n] markers pointing at `sources`. */
-  notes: string;
-  sources: Source[];
-}
-
-export interface ResearchRequest {
-  step: string;
-  system: string;
-  prompt: string;
-  maxSearches: number;
-}
-
 type Usage = {
   input_tokens: number;
   output_tokens: number;
@@ -48,14 +28,6 @@ type Usage = {
   cache_creation_input_tokens?: number | null;
   server_tool_use?: { web_search_requests: number } | null;
 };
-
-export interface GenerateRequest<Schema extends z.ZodType> {
-  step: string;
-  system: string;
-  prompt: string;
-  schema: Schema;
-  maxTokens?: number;
-}
 
 export interface UsageRecord {
   at: string;
@@ -78,7 +50,8 @@ export interface LlmOptions {
   onUsage?: (record: UsageRecord) => void;
 }
 
-export class Llm {
+/** Writes recaps through the Anthropic API with the user's own key. */
+export class Llm implements RecapWriter {
   private readonly client: Anthropic;
   totalCost = 0;
 
@@ -88,6 +61,10 @@ export class Llm {
     private readonly options: LlmOptions = {},
   ) {
     this.client = new Anthropic(options.apiKey ? { apiKey: options.apiKey } : {});
+  }
+
+  get name(): string {
+    return this.model;
   }
 
   async generate<Schema extends z.ZodType>(request: GenerateRequest<Schema>): Promise<z.infer<Schema>> {

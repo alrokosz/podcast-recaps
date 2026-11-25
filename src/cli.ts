@@ -100,7 +100,7 @@ const make = async (args: string[]) => {
   writeFileSync(join(workDir, "feed.xml"), xml);
   const llm = new Llm(settings.model, settings.effort, { apiKey: apiKey.key, usageLogPath: join(workDir, "usage.jsonl") });
   const result = await prepareRecap({
-    llm,
+    writer: llm,
     show,
     target: findEpisode(show, values.episode),
     workDir,

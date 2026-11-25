@@ -155,7 +155,7 @@ export class Worker {
       onUsage: (record) => this.store.recordUsage(job.id, record),
     });
     return prepareRecap({
-      llm,
+      writer: llm,
       show,
       target,
       workDir: showDir(this.options.dataDir, show.slug),
