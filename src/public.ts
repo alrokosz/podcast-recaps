@@ -4,6 +4,7 @@ import { estimateBatch } from "./costs.js";
 import type { Episode } from "./feed.js";
 import { buildFeed, guidFromKey, nextEpisode, type PublishedRecap } from "./feedxml.js";
 import { MODES } from "./modes.js";
+import { SESSION_WRITER } from "./packets.js";
 import { fetchShow, showDir } from "./pipeline.js";
 import { describeError, resolveSettings } from "./settings.js";
 import { ACTIVE_STATUSES, type ShowRow, type Store } from "./store.js";
@@ -162,7 +163,7 @@ export const createPublicServer = (options: PublicOptions): Server => {
     const heading = `<p class="muted">${escapeHtml(show.title)}</p><h1>${escapeHtml(next.title)}</h1>`;
 
     if (method === "POST") {
-      if (!(await options.hasApiKey())) {
+      if (settings.model !== SESSION_WRITER && !(await options.hasApiKey())) {
         return html("Not set up", `${heading}<p>The Mac running Podcast Recaps has no API key set, so it can't prepare episodes.</p>`);
       }
       const estimates = estimateBatch(showDir(dataDir, show.slug), show, [next], settings);
@@ -190,13 +191,22 @@ export const createPublicServer = (options: PublicOptions): Server => {
       );
     }
     const [estimate] = estimateBatch(showDir(dataDir, show.slug), show, [next], settings);
-    const cost = estimate?.reusesSavedRecap ? "free (a recap is already written)" : `about $${(estimate?.estimatedCostUsd ?? 0).toFixed(2)}`;
+    const bySession = settings.model === SESSION_WRITER;
+    const cost = estimate?.reusesSavedRecap
+      ? "free (a recap is already written)"
+      : bySession
+        ? "no API cost (written by Claude Code on your Mac)"
+        : `about $${(estimate?.estimatedCostUsd ?? 0).toFixed(2)}`;
     const failed = latest?.status === "failed" ? `<p><strong>The last attempt failed:</strong> ${escapeHtml(latest.error ?? "unknown error")}</p>` : "";
     return html(
       "Prepare next episode",
       `${heading}${failed}<p>Add a ${escapeHtml(MODES[settings.mode].label)} recap before this episode. Estimated cost: ${escapeHtml(cost)}.</p>
        <form method="post"><button type="submit">Prepare this episode</button></form>
-       <p class="muted">The Mac running Podcast Recaps needs to be awake. The episode appears in your feed when it's ready.</p>`,
+       <p class="muted">${
+         bySession
+           ? "It's written the next time you run /recaps:prepare in Claude Code on your Mac, then appears in your feed."
+           : "The Mac running Podcast Recaps needs to be awake. The episode appears in your feed when it's ready."
+       }</p>`,
     );
   };
 

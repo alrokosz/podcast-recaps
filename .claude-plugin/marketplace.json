@@ -1,0 +1,14 @@
+{
+  "name": "podcast-recaps",
+  "description": "Spoiler-safe podcast recaps written by your own Claude Code session.",
+  "owner": { "name": "alrokosz", "url": "https://github.com/alrokosz" },
+  "plugins": [
+    {
+      "name": "recaps",
+      "source": "./plugin",
+      "description": "Write spoiler-safe \"previously on\" recaps for podcast episodes with Claude Code and listen in a private Apple Podcasts feed.",
+      "category": "productivity",
+      "tags": ["podcasts", "audio", "recaps"]
+    }
+  ]
+}

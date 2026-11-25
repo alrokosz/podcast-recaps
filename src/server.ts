@@ -369,7 +369,10 @@ export const createApi = (options: ApiOptions): Server => {
       pattern: /^\/api\/shows\/(\d+)\/prepare$/,
       handle: async ([id], body) => {
         const { settings, estimates } = plan(Number(id), body);
-        if (!(await options.hasApiKey())) throw new HttpError(409, "Set an Anthropic API key first: recaps key set");
+        // Claude Code jobs are written by the user's session through the plugin, so they need no key.
+        if (settings.model !== SESSION_WRITER && !(await options.hasApiKey())) {
+          throw new HttpError(409, "Set an Anthropic API key first: recaps key set");
+        }
         const jobs = store.enqueue(Number(id), estimates, settings);
         worker.kick();
         return jobs.map(publicJob);

@@ -69,7 +69,7 @@ Before these checks were in place, the evaluation caught recaps that previewed t
 
 - A Mac (Apple silicon recommended) running a recent macOS
 - Node.js 22 or later
-- An [Anthropic API key](https://console.anthropic.com/)
+- An [Anthropic API key](https://console.anthropic.com/), or Claude Code with the plugin below
 - [Tailscale](https://tailscale.com/download) with Funnel enabled, so your iPhone can reach the feed from anywhere
 - Apple Podcasts on your iPhone
 - About 1 GB of disk space for whisper.cpp and its model, plus space for downloaded episodes
@@ -109,6 +109,29 @@ Then open **http://127.0.0.1:8786**. The page walks you through the rest:
 3. Add a show by searching Apple Podcasts or pasting a feed URL.
 4. Scan the QR code on your iPhone, then follow the show in Apple Podcasts with **Library → ⋯ → Follow a Show by URL**.
 5. Prepare an episode or a range.
+
+## Claude Code plugin (no API key)
+
+You can have your own Claude Code session write the recaps on your Claude plan, instead of using an API key. Install the plugin in Claude Code:
+
+```
+/plugin install recaps --marketplace alrokosz/podcast-recaps
+```
+
+On older versions of Claude Code, use `/plugin marketplace add alrokosz/podcast-recaps`, then `/plugin install recaps@podcast-recaps`.
+
+Then:
+
+```
+/recaps:setup                          install and start the local service, check transcription and Tailscale
+/recaps:add Revolutions                add a show and get its private feed URL
+/recaps:prepare Revolutions 1.7-1.12   write recaps for a range of episodes in this session
+/recaps:status                         see what's ready and what's waiting
+```
+
+`/recaps:prepare` shows what it will write and asks before starting. Each step runs in a fresh subagent: summaries, the private brief, research, and the script. The spoiler check always runs in a separate reviewer agent that didn't write the recap. The service validates every result against the same schemas the API path uses, then narrates, splices, and publishes each episode as it finishes.
+
+The plugin still needs the local service, and Tailscale for listening on your iPhone. It never runs Claude in the background. Episodes queued with Prepare next on your phone wait until you next run `/recaps:prepare`. To prepare on demand while your Mac is unattended, add an API key in the web UI.
 
 ## Command line
 
@@ -152,6 +175,9 @@ src/
   public.ts      Public feed server: feeds, audio ranges, Prepare next
   feedxml.ts     Builds the private cloned feed
   ui/            The web UI: plain HTML, CSS, and JS, no build step
+  writer.ts      The RecapWriter interface: the API (llm.ts) or a Claude Code session (packets.ts)
+  packets.ts     Work packets that wait for a Claude Code session
+plugin/          The Claude Code plugin: skills, subagents, and a dependency-free MCP server
 spike/           The original Apple Podcasts feed experiment
 ```
 
@@ -164,7 +190,7 @@ npm run typecheck
 
 ## Roadmap
 
-- A Claude Code plugin, so recaps can be written with a Claude subscription instead of an API key
+- Verify web sources quoted by the Claude Code plugin, as the API path's citations already are
 - Higher-quality local voices, such as Kokoro, and optional hosted voices
 - An npm package with one-command setup
 

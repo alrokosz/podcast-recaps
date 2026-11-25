@@ -11,6 +11,7 @@
     "recaps": "RECAPS_HOME=work NODE_OPTIONS=--disable-warning=ExperimentalWarning tsx --env-file-if-exists=.env.local src/cli.ts",
     "recap": "RECAPS_HOME=work NODE_OPTIONS=--disable-warning=ExperimentalWarning tsx --env-file-if-exists=.env.local src/cli.ts make",
     "serve": "RECAPS_HOME=work NODE_OPTIONS=--disable-warning=ExperimentalWarning tsx --env-file-if-exists=.env.local src/cli.ts serve",
+    "start": "NODE_OPTIONS=--disable-warning=ExperimentalWarning tsx src/cli.ts serve",
     "typecheck": "tsc --noEmit",
     "test": "NODE_OPTIONS=--disable-warning=ExperimentalWarning tsx --test src/**/*.test.ts"
   },
