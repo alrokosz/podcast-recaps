@@ -197,3 +197,7 @@ npm run typecheck
 ---
 
 Built with [Claude Code](https://claude.com/claude-code).
+
+## License
+
+[MIT](LICENSE). The license covers this code, not the podcasts you use it with.

@@ -3,8 +3,17 @@
   "displayName": "Podcast Recaps",
   "version": "0.1.0",
   "description": "Write spoiler-safe \"previously on\" recaps for podcast episodes with your Claude Code session, then listen in a private Apple Podcasts feed. No API key needed.",
-  "author": { "name": "alrokosz", "url": "https://github.com/alrokosz" },
+  "author": {
+    "name": "alrokosz",
+    "url": "https://github.com/alrokosz"
+  },
   "homepage": "https://github.com/alrokosz/podcast-recaps",
   "repository": "https://github.com/alrokosz/podcast-recaps",
-  "keywords": ["podcasts", "apple-podcasts", "recaps", "rss"]
+  "license": "MIT",
+  "keywords": [
+    "podcasts",
+    "apple-podcasts",
+    "recaps",
+    "rss"
+  ]
 }
