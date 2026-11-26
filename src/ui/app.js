@@ -502,7 +502,7 @@ const previewRow = (episode) => {
   const box = h("div", { class: "preview" }, "Loading…");
   api(`/api/jobs/${jobId}/text`)
     .then(({ text, sources }) => {
-      box.replaceChildren(text ?? "No recap text saved.", sources ? h("p", { class: "small-text muted" }, sources) : null);
+      box.replaceChildren(text ?? "No recap text saved.", sources ? h("p", { class: "small-text muted" }, sources) : "");
       if (episode.publishedJobId) box.append(h("audio", { controls: true, preload: "none", src: `/api/jobs/${jobId}/audio` }));
     })
     .catch((error) => box.replaceChildren(error.message));
